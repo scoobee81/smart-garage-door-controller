@@ -1,0 +1,398 @@
+esphome:
+  name: garage-door-control-v3
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: "******Redacted****"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_passphrase
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Garage-Door-Control-V3"
+    password: "****Redacted****"
+
+captive_portal:
+
+substitutions:
+  devicename: garagedoor_controller_v2
+  description: OpenGarage.io Device v2
+  friendly_name: Garage Door Controller
+
+
+switch:
+  - platform: gpio # The door opener contact (internal) this relay closes the contacts on the back of the Merlin Controller.
+    id: door_relay
+    pin: 15
+    restore_mode: ALWAYS_OFF
+    internal: true
+    on_turn_on:
+    - delay: 500ms
+    - switch.turn_off: door_relay
+
+button:
+  - platform: template #This button independently triggers the realy for the tigger contacts
+    id: activate_door_contact 
+    name: "Activate Door"
+    entity_category: diagnostic
+    on_press: 
+      - logger.log: "Door Button Pressed"
+      - switch.turn_on: door_relay
+  - platform: template #Sets the door to about 20% to allow airflow underneath
+    id: set_door_airflow
+    name: "Set Door to Airflow"
+    on_press:
+      then:
+        - cover.control:
+            id: ${devicename}_control
+            position: 20%
+  - platform: template #sets the door position to 60% high enough to walk under but not fully open.
+    id: set_door_walkunder
+    name: "Set Door to Walkunder"
+    on_press:
+      then:
+        - cover.control:
+            id: ${devicename}_control
+            position: 70%
+  - platform: template #resets the rotary encoder to zero - useful for calibrating
+    id: reset_encoder_zero
+    name: "Reset Encoder to Zero"
+    on_press: 
+      - sensor.rotary_encoder.set_value:
+          id: door_rotary_encoder
+          value: '0'   
+  - platform: template #saves the number of steps at open so that the door position sensor is accurate
+    id: save_current_steps_open
+    name: "Save Current Steps as Open"
+    on_press:
+      - number.set:
+          id: door_open_steps
+          value: !lambda |-
+            return (id(door_rotary_encoder).state);
+sensor:
+  - platform: rotary_encoder #this is the rotary encoder connected to the geared wheel inside the merlin box. I couldn't find a reliable way of doing it externally
+    name: "Rotary Encoder"
+    id: door_rotary_encoder
+    publish_initial_value: true
+    min_value: 0
+    accuracy_decimals: 0
+    pin_a:
+      number: GPIO17 #the encoder i used has pullup resistors on each pulse pin
+      mode: INPUT
+    pin_b:
+      number: GPIO18
+      mode: INPUT
+    on_clockwise:
+#      - logger.log: "Clockwise Detected"
+      - binary_sensor.template.publish:
+          id: rotation_detected
+          state: ON
+      - binary_sensor.template.publish:
+          id: clockwise_detected
+          state: ON
+
+    on_anticlockwise: #Anti Clockwise = Down
+#      - logger.log: "Anticlockwise Detected"
+      - binary_sensor.template.publish:
+          id: rotation_detected
+          state: ON
+      - binary_sensor.template.publish:
+          id: anticlockwise_detected
+          state: ON
+    filters:
+      - multiply: 0.1
+      - delta: 5
+    on_value:
+      then: 
+        - sensor.template.publish:
+            id: door_position
+            state: !lambda 'return ( (id(door_rotary_encoder).state)  /  (id(door_open_steps).state ) );'
+  - platform: template
+    name: "Door Position"
+    id: door_position
+    update_interval: 10s
+  - platform: ultrasonic  ### This is the US-100 Ultrasonic Sensor that measures the distance from the motor to the door attachment on the slider that the chain moves.
+    name: "${friendly_name} Distance"
+    id: ${devicename}_distance
+    trigger_pin: GPIO19
+    echo_pin: GPIO21
+    update_interval: 1s
+    unit_of_measurement: "cm"
+    accuracy_decimals: 0
+    pulse_time: 10us
+    timeout: 20m
+    internal: false
+    filters:
+      - filter_out: nan  # filter timeouts
+      - multiply: 100
+      - median:
+          window_size: 15
+          send_every: 5
+          send_first_at: 3
+#      - lambda: |-
+#          if ((x) >= (id(door_closed_dist_cm).state) ) {
+#            return (id(door_closed_dist_cm).state);
+#          } else if ((x) <= (id(door_open_dist_cm).state) ) {
+#            return (id(door_open_dist_cm).state);
+#          } else {
+#            return x;
+#          }  
+text_sensor:
+  - platform: template
+    name: "Encoder Direction"
+    id: encoder_direction
+    on_value:
+      - if:
+          condition:
+            text_sensor.state:
+              id: encoder_direction
+              state: 'Idle'
+          then:
+            - cover.template.publish:
+                id: ${devicename}_control
+                current_operation: IDLE
+      - if:
+          condition:
+            text_sensor.state:
+              id: encoder_direction
+              state: 'Clockwise'
+          then:
+            - cover.template.publish:
+                id: ${devicename}_control
+                current_operation: OPENING
+      - if:
+          condition:
+            text_sensor.state:
+              id: encoder_direction
+              state: 'Anticlockwise'
+          then:
+            - cover.template.publish:
+                id: ${devicename}_control
+                current_operation: CLOSING
+
+number:
+  - platform: template
+    name: "Door Open Steps"
+    id: door_open_steps
+    restore_value: true
+    optimistic: true
+    entity_category: config
+    min_value: 0
+    max_value: 10000
+    step: 1
+  - platform: template
+    name: "Door Open Distance (cm)"
+    id: door_open_dist_cm
+    optimistic: true
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+  - platform: template
+    name: "Door Closed Distance (cm)"
+    id: door_closed_dist_cm
+    optimistic: true
+    entity_category: config
+    min_value: 0
+    max_value: 300
+    step: 1
+  - platform: template
+    name: "Door Position Requested"
+    id: position_request
+    optimistic: true
+    entity_category: diagnostic
+    min_value: 0
+    max_value: 1
+    step: 0.01
+binary_sensor:
+  - platform: template
+    name: "Rotation Detected"
+    id: rotation_detected
+    entity_category: diagnostic
+#    filters:
+#      - delayed_off: 1s
+    on_press:
+      then:
+        - binary_sensor.template.publish:
+            id: rotation_detected
+            state: ON
+        - delay: 1.5s
+        - binary_sensor.template.publish:
+            id: anticlockwise_detected
+            state: OFF
+        - binary_sensor.template.publish:
+            id: clockwise_detected
+            state: OFF
+        - binary_sensor.template.publish:
+            id: rotation_detected
+            state: OFF
+        - text_sensor.template.publish:
+            id: encoder_direction
+            state: "Idle"
+  - platform: template
+    name: "Clockwise Detected"
+    id: clockwise_detected
+    entity_category: diagnostic
+#    filters:
+#      - delayed_on_off: 0.5s
+    on_press:
+      then:
+        - binary_sensor.template.publish:
+            id: clockwise_detected
+            state: ON
+        - text_sensor.template.publish:
+            id: encoder_direction
+            state: "Clockwise"
+  #      - delay: 1s
+  #      - binary_sensor.template.publish:
+  #          id: clockwise_detected
+  #          state: OFF
+
+  - platform: template
+    name: "Anticlockwise Detected"
+    id: anticlockwise_detected
+    entity_category: diagnostic
+ #   filters:
+#      - delayed_on_off: 0.5s
+    on_press:
+      then:
+        - binary_sensor.template.publish:
+            id: anticlockwise_detected
+            state: ON
+        - text_sensor.template.publish:
+            id: encoder_direction
+            state: "Anticlockwise"
+#        - delay: 1s
+#        - binary_sensor.template.publish:
+#            id: anticlockwise_detected
+#            state: OFF
+  - platform: template
+    name: "Door Closed Ultrasonic"
+    id: door_closed_us
+    entity_category: diagnostic
+    lambda: |-
+      if (id(${devicename}_distance).state > id(door_closed_dist_cm).state ) {
+        return true;
+      } else {
+        return false;
+      }
+      
+            
+# *********************  The Actual Cover Template ********************
+cover:
+  - platform: template
+    device_class: garage
+    name: "${friendly_name} Control"
+    has_position: true
+    optimistic: false
+    assumed_state: false
+    ### This Lambda is to ensure that the door has an open and closed value based on the Ultrasonic even if the door hasnt been calibrated. If the Globals have been set to True then it will calculate the Exact position.
+    lambda: 'return ( (id(door_rotary_encoder).state)  /  (id(door_open_steps).state ) );'
+    id: ${devicename}_control
+    open_action:
+      - script.stop: door_position_command
+      - lambda: id(position_request).state = 1.0;
+      - script.execute: door_position_command
+    stop_action:
+      - script.stop: door_position_command
+      - script.execute: stop_door
+    close_action:
+      - script.stop: door_position_command
+      - lambda: id(position_request).state = 0.0;
+      - script.execute: door_position_command
+    position_action:
+      - script.stop: door_position_command
+#      - lambda: id(${devicename}_position).state;
+      - lambda: id(position_request).state = pos;
+      - script.execute: door_position_command
+
+# ****************** Various Scripts ***********************************************      
+script:      
+  - id: raise_door
+    mode: single
+    then:
+      - button.press: activate_door_contact
+      - delay: 0.5s
+      - if:
+          condition:
+            - lambda: 'return id(${devicename}_control).current_operation ==  COVER_OPERATION_CLOSING;'
+          then:
+            - logger.log: "Door Direction is incorrect reversing"
+            - delay: 1s
+            - button.press: activate_door_contact
+            - delay: 1s
+            - button.press: activate_door_contact
+  - id: lower_door
+    mode: single
+    then:
+      - button.press: activate_door_contact
+      - delay: 0.5s
+      - if:
+          condition:
+            - lambda: 'return id(${devicename}_control).current_operation ==  COVER_OPERATION_OPENING;'
+          then:
+            - logger.log: "Door Direction is incorrect reversing"
+            - delay: 1s
+            - button.press: activate_door_contact
+            - delay: 1s
+            - button.press: activate_door_contact
+  - id: stop_door
+    mode: single
+    then:
+      - script.stop: door_position_command
+      - button.press: activate_door_contact
+      
+  - id: door_position_command
+    mode: restart
+    then:
+      - if:
+          condition:
+            - lambda: return id(position_request).state == 1.0;
+          then:
+            - script.execute: raise_door
+            - script.wait: raise_door
+            - wait_until:
+               - lambda: return id(${devicename}_control).position == 1.0 ;
+                  #- script.execute: open_calibrate
+          else:
+            - if:
+                condition:
+                  - lambda: return id(position_request).state == 0.0;
+                then:
+                  - script.execute: lower_door
+                  - script.wait: lower_door
+                  - wait_until:
+                    - lambda: return id(${devicename}_control).position == 0.0 ;
+
+                else:
+                  - if:
+                      condition:
+                        - lambda: return id(position_request).state > id(${devicename}_control).position + 0.01;
+                      then:
+                        - script.execute: raise_door
+                        - wait_until:
+                          - lambda: return id(${devicename}_control).position > id(position_request).state;
+                        - script.execute: stop_door
+                      else:
+                        - if:
+                            condition:
+                              - lambda: return id(position_request).state < id(${devicename}_control).position - 0.01;
+                            then:
+                              - script.execute: lower_door
+                              - wait_until:
+                                - lambda: return id(${devicename}_control).position < id(position_request).state;
+                              - script.execute: stop_door
+### EOF ###
