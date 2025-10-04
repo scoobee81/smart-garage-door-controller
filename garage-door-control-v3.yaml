@@ -8,6 +8,8 @@ esp32:
 
 #adding a line here for testing a commit 04102025 1553AEST
 
+#adding another line here for testing a branch 04102025 1602AEST
+
 # Enable logging
 logger:
   level: INFO
