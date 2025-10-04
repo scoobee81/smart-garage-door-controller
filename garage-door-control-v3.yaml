@@ -6,6 +6,8 @@ esp32:
   framework:
     type: arduino
 
+#adding a line here for testing a commit 04102025 1553AEST
+
 # Enable logging
 logger:
   level: INFO
